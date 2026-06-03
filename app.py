@@ -3,6 +3,19 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 import numpy as np
+from datetime import date as date_type
+
+# ─── SUPABASE CONNECTION
+@st.cache_resource
+def get_supabase():
+    from supabase import create_client
+    return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
+
+try:
+    sb = get_supabase()
+    DB_OK = True
+except Exception:
+    DB_OK = False
 
 # ─── PAGE CONFIG
 st.set_page_config(
@@ -160,10 +173,13 @@ GRID = dict(showgrid=True, gridcolor="rgba(0,0,0,0.07)")
 #
 # NAVIGATION
 #
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊  Dashboard",
     "🔍  Store Search & Analysis",
+    "🏪  Site Directory",
     "⚠️  Delay Analysis",
+    "📋  Inspection Log",
+    "✅  Issue Tracker",
     "🤖  AI Summary"
 ])
 
@@ -740,9 +756,9 @@ with tab2:
 
 
 #
-# TAB 3 — DELAY ANALYSIS
+# TAB 4 — DELAY ANALYSIS
 #
-with tab3:
+with tab4:
     st.markdown("### ⚠️ Delay Analysis")
     st.caption("Filter by any dimension to drill into delayed sites. Table is sorted by delay severity.")
 
@@ -827,9 +843,9 @@ with tab3:
 
 
 #
-# TAB 4 — AI SUMMARY
+# TAB 7 — AI SUMMARY
 #
-with tab4:
+with tab7:
     st.markdown("### 🤖 AI Executive Summary Generator")
     st.caption("Powered by Groq LLaMA-3.3-70B · Generates a management-ready briefing from live project data.")
 
@@ -936,6 +952,227 @@ Be direct, data-driven, specific. No filler language. No preamble."""
         except Exception as e:
             st.error(f"AI call failed: {e}")
             st.info("Set `GROQ_API_KEY` in `.streamlit/secrets.toml` to enable AI summaries.")
+
+
+
+#
+# TAB 3 — SITE DIRECTORY
+#
+with tab3:
+    st.markdown("### 🏪 Site Directory")
+    st.caption("Browse all sites. Click any site to expand its full profile and inspection history.")
+
+    # Filters
+    sd1, sd2, sd3 = st.columns(3)
+    dir_zone   = sd1.selectbox("Zone",   ["All"] + sorted(df["Zone"].dropna().unique().tolist()),   key="dir_z")
+    dir_status = sd2.selectbox("Status", ["All", "LAUNCHED", "YTL"],                                key="dir_s")
+    dir_search = sd3.text_input("Search Site Name", placeholder="Type to filter…",                  key="dir_q")
+
+    dir_df = df.copy()
+    if dir_zone   != "All": dir_df = dir_df[dir_df["Zone"] == dir_zone]
+    if dir_status != "All": dir_df = dir_df[dir_df["LAUNCHED / YTL"] == dir_status]
+    if dir_search:          dir_df = dir_df[dir_df["Site Name"].str.contains(dir_search, case=False, na=False)]
+
+    dir_df = dir_df.sort_values("Delay (Days)", ascending=False)
+    st.markdown(f"Showing **{len(dir_df)}** site(s)")
+
+    for _, row in dir_df.iterrows():
+        s_icon     = "✅" if row.get("LAUNCHED / YTL") == "LAUNCHED" else "🔄"
+        delay_days = int(row.get("Delay (Days)", 0))
+        delay_txt  = f"⚠️ {delay_days}d delayed" if delay_days > 0 else "✅ On track"
+        label      = f"{s_icon}  {row['Site Name']}  ·  {row.get('City','—')}  ·  {row.get('Zone','—')}  ·  {delay_txt}"
+
+        with st.expander(label):
+            c1, c2, c3 = st.columns(3)
+
+            with c1:
+                st.markdown("**📍 Location**")
+                st.write(f"Zone: {row.get('Zone','—')}")
+                st.write(f"State: {row.get('State','—')}")
+                st.write(f"City: {row.get('City','—')}")
+                st.write(f"Cluster: {row.get('Cluster','—')}")
+                st.write(f"Area: {row.get('Area (Sqft)','—')} sqft")
+
+            with c2:
+                st.markdown("**👥 Team**")
+                st.write(f"PM Head: {row.get('PM Head','—')}")
+                st.write(f"PM: {row.get('PM','—')}")
+                st.write(f"Planner: {row.get('PM Planner','—')}")
+                st.write(f"EIC: {row.get('EIC','—')}")
+                st.write(f"ZH: {row.get('ZH','—')}")
+
+            with c3:
+                st.markdown("**📅 Dates & Status**")
+                st.write(f"Planned Finish: {str(row.get('Planned Finish Date','—'))[:10]}")
+                st.write(f"Actual Finish:  {str(row.get('Actual Finish Date','—'))[:10]}")
+                st.write(f"Forecasted:     {str(row.get('Forecasted Finish Date','—'))[:10]}")
+                st.write(f"Delay: **{delay_days} days**")
+                st.write(f"Status: **{row.get('LAUNCHED / YTL','—')}**")
+                st.write(f"FY: {row.get('FY','—')}  |  {row.get('AOP / NON AOP','—')}")
+
+            # Inspection history from Supabase
+            if DB_OK:
+                st.markdown("---")
+                st.markdown("**🔍 Inspection History**")
+                try:
+                    insp_res = sb.table("inspections").select("id, zonal_head, inspection_date, inspection_time, notes").eq("site_name", row["Site Name"]).order("inspection_date", desc=True).execute()
+                    if insp_res.data:
+                        for insp in insp_res.data:
+                            st.markdown(f"📅 **{insp['inspection_date']}** at {insp['inspection_time']} — ZH: *{insp['zonal_head']}*")
+                            if insp.get("notes"):
+                                st.markdown(f"> {insp['notes']}")
+                            # Issues for this inspection
+                            iss_res = sb.table("issues").select("issue_description, severity, status").eq("inspection_id", insp["id"]).execute()
+                            if iss_res.data:
+                                for iss in iss_res.data:
+                                    sev_icon = {"Low":"🟡","Medium":"🟠","High":"🔴","Critical":"🚨"}.get(iss["severity"],"⚪")
+                                    done_icon = "✅" if iss["status"] == "Resolved" else "🔴"
+                                    st.markdown(f"&nbsp;&nbsp;&nbsp;{done_icon} {sev_icon} {iss['issue_description']} — *{iss['severity']}* — **{iss['status']}**")
+                    else:
+                        st.info("No inspections recorded yet for this site.")
+                except Exception as e:
+                    st.warning(f"Could not load inspections: {e}")
+
+
+#
+# TAB 5 — INSPECTION LOG
+#
+with tab5:
+    st.markdown("### 📋 Inspection Log")
+    st.caption("Zonal heads log site visits, observations, and flag issues.")
+
+    if not DB_OK:
+        st.error("Database not connected. Check SUPABASE_URL and SUPABASE_KEY in Streamlit secrets.")
+        st.stop()
+
+    site_list = sorted(df["Site Name"].dropna().unique().tolist())
+
+    with st.form("inspection_form", clear_on_submit=True):
+        st.markdown("#### Log New Inspection")
+
+        if1, if2 = st.columns(2)
+        insp_site = if1.selectbox("Site Name", site_list, key="if_site")
+        insp_zh   = if2.text_input("Zonal Head Name", placeholder="Enter your name")
+
+        id1, id2 = st.columns(2)
+        insp_date = id1.date_input("Inspection Date", value=date_type.today())
+        insp_time = id2.time_input("Inspection Time")
+
+        insp_notes = st.text_area("General Observations / Notes",
+                                   placeholder="Overall site condition, progress, concerns…", height=100)
+
+        st.markdown("#### Issues Found During Inspection")
+        st.caption("Leave blank if no issue. Add up to 6.")
+
+        issues_to_save = []
+        for i in range(6):
+            ic1, ic2 = st.columns([4, 1])
+            i_desc = ic1.text_input(f"Issue {i+1}", placeholder=f"Describe issue {i+1}…", key=f"idesc_{i}")
+            i_sev  = ic2.selectbox("Severity", ["Low","Medium","High","Critical"], key=f"isev_{i}")
+            if i_desc.strip():
+                issues_to_save.append({"description": i_desc.strip(), "severity": i_sev})
+
+        submitted = st.form_submit_button("✅ Submit Inspection", type="primary")
+
+        if submitted:
+            if not insp_zh.strip():
+                st.error("Please enter the Zonal Head name.")
+            else:
+                try:
+                    insp_payload = {
+                        "site_name":       insp_site,
+                        "zonal_head":      insp_zh.strip(),
+                        "inspection_date": str(insp_date),
+                        "inspection_time": str(insp_time),
+                        "notes":           insp_notes.strip()
+                    }
+                    result = sb.table("inspections").insert(insp_payload).execute()
+                    insp_id = result.data[0]["id"]
+
+                    for iss in issues_to_save:
+                        sb.table("issues").insert({
+                            "inspection_id":     insp_id,
+                            "issue_description": iss["description"],
+                            "severity":          iss["severity"],
+                            "status":            "Open"
+                        }).execute()
+
+                    st.success(f"✅ Inspection logged for **{insp_site}**. {len(issues_to_save)} issue(s) recorded.")
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
+
+    # Recent inspections table
+    st.divider()
+    st.markdown("#### Recent Inspections")
+    try:
+        recent = sb.table("inspections").select("site_name, zonal_head, inspection_date, inspection_time, notes").order("created_at", desc=True).limit(30).execute()
+        if recent.data:
+            st.dataframe(pd.DataFrame(recent.data), use_container_width=True, hide_index=True)
+        else:
+            st.info("No inspections logged yet.")
+    except Exception as e:
+        st.warning(f"Could not load recent inspections: {e}")
+
+
+#
+# TAB 6 — ISSUE TRACKER
+#
+with tab6:
+    st.markdown("### ✅ Issue Tracker & Engineer Checklist")
+    st.caption("Site engineers view issues flagged during inspections and mark them resolved.")
+
+    if not DB_OK:
+        st.error("Database not connected. Check SUPABASE_URL and SUPABASE_KEY in Streamlit secrets.")
+        st.stop()
+
+    site_list2 = sorted(df["Site Name"].dropna().unique().tolist())
+    it_site = st.selectbox("Select Your Site", site_list2, key="it_site")
+
+    try:
+        insp_for_site = sb.table("inspections").select("id, zonal_head, inspection_date, notes").eq("site_name", it_site).order("inspection_date", desc=True).execute()
+
+        if not insp_for_site.data:
+            st.info("No inspections recorded for this site yet.")
+        else:
+            all_issues = []
+            for insp in insp_for_site.data:
+                iss = sb.table("issues").select("*").eq("inspection_id", insp["id"]).execute()
+                for issue in iss.data:
+                    issue["inspection_date"] = insp["inspection_date"]
+                    issue["zonal_head"]      = insp["zonal_head"]
+                    all_issues.append(issue)
+
+            open_issues     = [i for i in all_issues if i["status"] == "Open"]
+            resolved_issues = [i for i in all_issues if i["status"] == "Resolved"]
+
+            # Summary metrics
+            im1, im2, im3 = st.columns(3)
+            im1.metric("Total Issues",    len(all_issues))
+            im2.metric("Open",            len(open_issues),     delta=f"{len(open_issues)} need action", delta_color="inverse")
+            im3.metric("Resolved",        len(resolved_issues), delta=f"{len(resolved_issues)} done",    delta_color="normal")
+
+            st.divider()
+
+            if open_issues:
+                st.markdown("#### 🔴 Open Issues — Action Required")
+                for iss in sorted(open_issues, key=lambda x: ["Critical","High","Medium","Low"].index(x.get("severity","Low"))):
+                    sev_icon  = {"Low":"🟡","Medium":"🟠","High":"🔴","Critical":"🚨"}.get(iss["severity"],"⚪")
+                    rc1, rc2, rc3 = st.columns([4, 1, 1])
+                    rc1.markdown(f"{sev_icon} **{iss['issue_description']}**  \n*Flagged by {iss['zonal_head']} on {iss['inspection_date']}*")
+                    rc2.markdown(f"**{iss['severity']}**")
+                    if rc3.button("Mark Resolved ✅", key=f"res_{iss['id']}"):
+                        sb.table("issues").update({"status": "Resolved"}).eq("id", iss["id"]).execute()
+                        st.rerun()
+            else:
+                st.success("✅ All issues resolved for this site.")
+
+            if resolved_issues:
+                with st.expander(f"✅ {len(resolved_issues)} Resolved Issue(s)"):
+                    for iss in resolved_issues:
+                        st.markdown(f"✅ ~~{iss['issue_description']}~~ · *{iss['zonal_head']}* · {iss['inspection_date']}")
+
+    except Exception as e:
+        st.error(f"Could not load issues: {e}")
 
 
 # ─── FOOTER
